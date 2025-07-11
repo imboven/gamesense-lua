@@ -78,6 +78,9 @@ local enabled = ui_new_checkbox("MISC", "Miscellaneous", "Watermark")
 local color_picker = ui_new_color_picker("MISC", "Miscellaneous", "Watermark Color")
 ui_set(color_picker, 255, 255, 255, 255)
 
+local sense_color_picker = ui_new_color_picker("MISC", "Miscellaneous", "Sense Color")
+ui_set(sense_color_picker, 159, 202, 43, 255)
+
 local watermark_elements = ui_new_multiselect("MISC", "Miscellaneous", "Watermark Elements", {
     "Custom Text", "Fps", "Ping", "Kdr", "Time", "Map name", "Tickrate", 
     "Duck amount", "Enemies", "Server ip", "Username", "Time + seconds"
@@ -113,6 +116,13 @@ local positions = database_read("wsh_positions") or {
     watermark = {x = 0, y = 0},
     spectator = {x = 0, y = 0},
     hotkeys = {x = 0, y = 0}
+}
+
+local spectator_anims = {}
+local hotkey_items = {
+    {name = "Double tap", ref_checkbox = refs.rage.aimbot.double_tap.checkbox, ref_hotkey = refs.rage.aimbot.double_tap.hotkey, anim = 0},
+    {name = "Hide shots", ref_checkbox = refs.aa.other.onshot.checkbox, ref_hotkey = refs.aa.other.onshot.hotkey, anim = 0},
+    {name = "Duck peek assist", ref_checkbox = refs.rage.other.duck, ref_hotkey = nil, anim = 0}
 }
 
 local function hsv_to_rgb(h, s, v)
@@ -193,7 +203,7 @@ local function get_spectators()
             if cob_target and cob_target == target_player and (cob_mode == 4 or cob_mode == 5) then
                 local name = entity_get_player_name(ent)
                 if name then
-                    spectators[#spectators + 1] = name
+                    table.insert(spectators, {name = name, ent = ent})
                 end
             end
         end
@@ -282,7 +292,9 @@ local function watermark()
     local rainbow_time = globals_realtime() * (ui_get(rainbow_speed) / 100)
     local rainbow_r, rainbow_g, rainbow_b = hsv_to_rgb(rainbow_time % 1, 1, 1)
     
-    local all_elements = {"gamesense"}
+    local header_part1 = "game"
+    local header_part2 = "sense"
+    local all_elements = {}
     
     if type(elements) == "table" then
         for i, element in ipairs(elements) do
@@ -326,9 +338,10 @@ local function watermark()
         end
     end
     
-    local full_text = table.concat(all_elements, " | ")
-
-    local text_width = renderer_measure_text(nil, full_text)
+    local content_text = table.concat(all_elements, " | ")
+    local suffix = (#all_elements > 0 and " | " or "") .. content_text
+    local measure_text = header_part1 .. header_part2 .. suffix
+    local text_width = renderer_measure_text(nil, measure_text)
     local base_padding = math_floor(8 * screen_adaptation.padding_scale)
     local base_height = math_floor(16 * screen_adaptation.padding_scale)
     local w, h = text_width + base_padding, base_height
@@ -398,14 +411,27 @@ local function watermark()
     end
     
     local color_r, color_g, color_b, color_a = ui_get(color_picker)
+    local sense_r, sense_g, sense_b, sense_a = ui_get(sense_color_picker)
     local text_alpha = math_floor(animation.watermark * color_a)
+    local sense_text_alpha = math_floor(animation.watermark * sense_a)
     local shadow_alpha = math_floor(animation.watermark * 180)
     
     local text_padding_x = math_floor(4 * screen_adaptation.padding_scale)
     local text_padding_y = math_floor(4 * screen_adaptation.padding_scale)
     
-    renderer_text(x + text_padding_x, y + text_padding_y + 1, 0, 0, 0, shadow_alpha, nil, 0, full_text)
-    renderer_text(x + text_padding_x, y + text_padding_y, color_r, color_g, color_b, text_alpha, nil, 0, full_text)
+    local current_x = x + text_padding_x
+    local text_y = y + text_padding_y
+    
+    renderer_text(current_x, text_y + 1, 0, 0, 0, shadow_alpha, nil, 0, header_part1)
+    renderer_text(current_x, text_y, color_r, color_g, color_b, text_alpha, nil, 0, header_part1)
+    current_x = current_x + renderer_measure_text(nil, header_part1)
+
+    renderer_text(current_x, text_y + 1, 0, 0, 0, shadow_alpha, nil, 0, header_part2)
+    renderer_text(current_x, text_y, sense_r, sense_g, sense_b, sense_text_alpha, nil, 0, header_part2)
+    current_x = current_x + renderer_measure_text(nil, header_part2)
+
+    renderer_text(current_x, text_y + 1, 0, 0, 0, shadow_alpha, nil, 0, suffix)
+    renderer_text(current_x, text_y, color_r, color_g, color_b, text_alpha, nil, 0, suffix)
 end
 
 local function spectator_list()
@@ -414,25 +440,53 @@ local function spectator_list()
     local spectators = get_spectators()
     local is_menu_open = ui.is_menu_open()
     
-    local should_show = ui_get(spectator_enabled) and (#spectators > 0 or is_menu_open)
+    local target_anims = {}
+    for _, spec in ipairs(spectators) do
+        target_anims[spec.ent] = 1
+    end
+    
+    for ent, _ in pairs(target_anims) do
+        spectator_anims[ent] = lerp(spectator_anims[ent] or 0, 1, animation.speed)
+    end
+    
+    local to_remove = {}
+    for ent, anim in pairs(spectator_anims) do
+        if not target_anims[ent] then
+            spectator_anims[ent] = lerp(anim, 0, animation.speed)
+            if spectator_anims[ent] < animation.threshold then
+                table.insert(to_remove, ent)
+            end
+        end
+    end
+    for _, ent in ipairs(to_remove) do
+        spectator_anims[ent] = nil
+    end
+    
+    local display_spectators = {}
+    for ent, anim in pairs(spectator_anims) do
+        local name = entity_get_player_name(ent)
+        if name and anim > 0.01 then
+            table.insert(display_spectators, {name = name, progress = anim})
+        end
+    end
+    table.sort(display_spectators, function(a, b) return a.name < b.name end)
+    
+    local should_show = ui_get(spectator_enabled) and (#display_spectators > 0 or is_menu_open)
     animation.spectator = lerp(animation.spectator, should_show and 1 or 0, animation.speed)
     
     if animation.spectator < 0.01 then return end
     
-    if #spectators == 0 and is_menu_open then
-        spectators = {"example spectator", "another viewer"}
+    if #display_spectators == 0 and is_menu_open then
+        display_spectators = {{name = "example spectator", progress = 1}, {name = "another viewer", progress = 1}}
     end
-    
-    local target_count = #spectators
-    animation.spectator_count = lerp(animation.spectator_count, target_count, animation.speed)
     
     local screen_width, screen_height = client_screen_size()
     local rainbow_time = globals_realtime() * (ui_get(rainbow_speed) / 100)
     local rainbow_r, rainbow_g, rainbow_b = hsv_to_rgb(rainbow_time % 1, 1, 1)
     
     local max_name_width = 0
-    for i = 1, #spectators do
-        local name_width = renderer_measure_text(nil, spectators[i])
+    for _, spec in ipairs(display_spectators) do
+        local name_width = renderer_measure_text(nil, spec.name)
         if name_width > max_name_width then
             max_name_width = name_width
         end
@@ -444,16 +498,16 @@ local function spectator_list()
     local header_h = 16
     local item_h = 14
     
-    local animated_item_count = animation.spectator_count
-    local total_h = header_h + (animated_item_count * item_h)
-    animation.spectator_height = total_h
+    local animated_height = 0
+    for _, spec in ipairs(display_spectators) do
+        animated_height = animated_height + spec.progress * item_h
+    end
+    local total_h = header_h + animated_height
     
     local x, y
     if positions.spectator.x == 0 and positions.spectator.y == 0 then
         x = 16
-        y = screen_height / 2 - total_h / 2
-        positions.spectator.x = x
-        positions.spectator.y = y
+        y = screen_height - total_h - 16
     else
         x = positions.spectator.x
         y = positions.spectator.y
@@ -516,58 +570,76 @@ local function spectator_list()
     
     local separator_alpha = math_floor(animation.spectator * 255)
     renderer_rectangle(x + 1, y + header_h, w - 2, 1, 45, 45, 45, separator_alpha)
-    
-    for i = 1, #spectators do
-        local item_progress = math_min(1, math_max(0, animation.spectator_count - (i - 1)))
-        local item_offset = (1 - item_progress) * item_h * 0.5
+
+    local current_offset = header_h
+    for i, spec in ipairs(display_spectators) do
+        local item_progress = spec.progress
+        local this_height = item_progress * item_h
+        local item_y = y + current_offset
         
         local item_alpha = math_floor(animation.spectator * item_progress * 255)
         local item_bg_alpha = math_floor(animation.spectator * item_progress * 25)
         local item_sep_alpha = math_floor(animation.spectator * item_progress * 45)
         local name_shadow_alpha = math_floor(animation.spectator * item_progress * 180)
         
-        if item_progress > 0.01 then
-            local item_y = y + header_h + ((i - 1) * item_h) + item_offset
-            
-            renderer_rectangle(x, item_y, w, item_h, 25, 25, 25, item_bg_alpha)
-            
+        if this_height > 0.5 then
             if i > 1 then
                 renderer_rectangle(x + 1, item_y, w - 2, 1, 45, 45, 45, item_sep_alpha)
             end
+            renderer_rectangle(x, item_y, w, this_height, 25, 25, 25, item_bg_alpha)
             
-            local text_width = renderer_measure_text(nil, spectators[i])
+            local text_y = item_y + 1
+            local text_width = renderer_measure_text(nil, spec.name)
             local name_x = x + (w / 2) - (text_width / 2)
-            renderer_text(name_x, item_y + 1 + 1, 0, 0, 0, name_shadow_alpha, nil, 0, spectators[i])
-            renderer_text(name_x, item_y + 1, 255, 255, 255, item_alpha, nil, 0, spectators[i])
+            renderer_text(name_x, text_y + 1, 0, 0, 0, name_shadow_alpha, nil, 0, spec.name)
+            renderer_text(name_x, text_y, 255, 255, 255, item_alpha, nil, 0, spec.name)
         end
+        
+        current_offset = current_offset + this_height
     end
 end
 
 local function hotkeys_list()
     update_screen_scale()
     
-    local hotkeys = get_active_hotkeys()
     local is_menu_open = ui.is_menu_open()
     
-    local should_show = ui_get(hotkeys_enabled) and (#hotkeys > 0 or is_menu_open)
+    for _, item in ipairs(hotkey_items) do
+        local active = false
+        if ui_get(item.ref_checkbox) then
+            if item.ref_hotkey then
+                local is_active, mode = ui_get(item.ref_hotkey)
+                active = is_active
+            else
+                active = true
+            end
+        end
+        item.anim = lerp(item.anim, active and 1 or 0, animation.speed)
+    end
+    
+    local display_hotkeys = {}
+    for _, item in ipairs(hotkey_items) do
+        if item.anim > 0.01 then
+            table.insert(display_hotkeys, {name = item.name, state = "on", progress = item.anim})
+        end
+    end
+    
+    local should_show = ui_get(hotkeys_enabled) and (#display_hotkeys > 0 or is_menu_open)
     animation.hotkeys = lerp(animation.hotkeys, should_show and 1 or 0, animation.speed)
     
     if animation.hotkeys < 0.01 then return end
     
-    if #hotkeys == 0 and is_menu_open then
-        hotkeys = {{name = "Double tap", state = "on"}, {name = "Hide shots", state = "on"}}
+    if #display_hotkeys == 0 and is_menu_open then
+        display_hotkeys = {{name = "Double tap", state = "on", progress = 1}, {name = "Hide shots", state = "on", progress = 1}}
     end
-    
-    local target_count = #hotkeys
-    animation.hotkeys_count = lerp(animation.hotkeys_count, target_count, animation.speed)
     
     local screen_width, screen_height = client_screen_size()
     local rainbow_time = globals_realtime() * (ui_get(rainbow_speed) / 100)
     local rainbow_r, rainbow_g, rainbow_b = hsv_to_rgb(rainbow_time % 1, 1, 1)
     
     local max_name_width = 0
-    for i = 1, #hotkeys do
-        local full_text = hotkeys[i].name .. " [" .. hotkeys[i].state .. "]"
+    for _, hotkey in ipairs(display_hotkeys) do
+        local full_text = hotkey.name .. " [" .. hotkey.state .. "]"
         local name_width = renderer_measure_text(nil, full_text)
         if name_width > max_name_width then
             max_name_width = name_width
@@ -580,16 +652,16 @@ local function hotkeys_list()
     local header_h = 16
     local item_h = 14
     
-    local animated_item_count = animation.hotkeys_count
-    local total_h = header_h + (animated_item_count * item_h)
-    animation.hotkeys_height = total_h
+    local animated_height = 0
+    for _, hotkey in ipairs(display_hotkeys) do
+        animated_height = animated_height + hotkey.progress * item_h
+    end
+    local total_h = header_h + animated_height
     
     local x, y
     if positions.hotkeys.x == 0 and positions.hotkeys.y == 0 then
         x = screen_width - w - 16
-        y = screen_height / 2 - total_h / 2
-        positions.hotkeys.x = x
-        positions.hotkeys.y = y
+        y = screen_height - total_h - 16
     else
         x = positions.hotkeys.x
         y = positions.hotkeys.y
@@ -653,31 +725,32 @@ local function hotkeys_list()
     local separator_alpha = math_floor(animation.hotkeys * 255)
     renderer_rectangle(x + 1, y + header_h, w - 2, 1, 45, 45, 45, separator_alpha)
 
-    for i = 1, #hotkeys do
-
-        local item_progress = math_min(1, math_max(0, animation.hotkeys_count - (i - 1)))
-        local item_offset = (1 - item_progress) * item_h * 0.5 
+    local current_offset = header_h
+    for i, hotkey in ipairs(display_hotkeys) do
+        local item_progress = hotkey.progress
+        local this_height = item_progress * item_h
+        local item_y = y + current_offset
         
         local item_alpha = math_floor(animation.hotkeys * item_progress * 255)
         local item_bg_alpha = math_floor(animation.hotkeys * item_progress * 25)
         local item_sep_alpha = math_floor(animation.hotkeys * item_progress * 45)
         local name_shadow_alpha = math_floor(animation.hotkeys * item_progress * 180)
         
-        if item_progress > 0.01 then
-            local item_y = y + header_h + ((i - 1) * item_h) + item_offset
-            
-            renderer_rectangle(x, item_y, w, item_h, 25, 25, 25, item_bg_alpha)
-            
+        if this_height > 0.5 then
             if i > 1 then
                 renderer_rectangle(x + 1, item_y, w - 2, 1, 45, 45, 45, item_sep_alpha)
             end
+            renderer_rectangle(x, item_y, w, this_height, 25, 25, 25, item_bg_alpha)
             
-            local full_text = hotkeys[i].name .. " [" .. hotkeys[i].state .. "]"
+            local text_y = item_y + 1
+            local full_text = hotkey.name .. " [" .. hotkey.state .. "]"
             local text_width = renderer_measure_text(nil, full_text)
             local name_x = x + (w / 2) - (text_width / 2)
-            renderer_text(name_x, item_y + 1 + 1, 0, 0, 0, name_shadow_alpha, nil, 0, full_text)
-            renderer_text(name_x, item_y + 1, 255, 255, 255, item_alpha, nil, 0, full_text)
+            renderer_text(name_x, text_y + 1, 0, 0, 0, name_shadow_alpha, nil, 0, full_text)
+            renderer_text(name_x, text_y, 255, 255, 255, item_alpha, nil, 0, full_text)
         end
+        
+        current_offset = current_offset + this_height
     end
 end
 
@@ -685,3 +758,10 @@ client.set_event_callback("paint", watermark)
 client.set_event_callback("paint", spectator_list)
 client.set_event_callback("paint", hotkeys_list)
 client.set_event_callback("paint_ui", handle_mouse)
+
+client.set_event_callback("setup_command", function(cmd)
+    if ui.is_menu_open() and (dragging.watermark or dragging.spectator or dragging.hotkeys) then
+        cmd.in_attack = 0
+        cmd.in_attack2 = 0
+    end
+end)
